@@ -5,7 +5,7 @@
 //   nvcc -O3 -std=c++17 -arch=sm_89 main.cu -o gitminer-head
 //
 // Run:
-//   ./gitminer-head [prefix=0000000] [nonce_digits=10] [device=0]
+//   ./gitminer-head [--prefix 0000000] [nonce_digits=10] [device=0]
 
 #include <cuda_runtime.h>
 
@@ -377,8 +377,8 @@ std::vector<uint8_t> make_candidate_object(const std::string& header_and_body_pr
 
 std::string usage(const char* argv0) {
     std::ostringstream out;
-    out << "Usage: " << argv0 << " [prefix=" << kDefaultPrefix << "] [nonce_digits="
-        << kDefaultNonceDigits << "] [device=0]\n";
+    out << "Usage: " << argv0 << " [--prefix HEX] [nonce_digits=" << kDefaultNonceDigits
+        << "] [device=0]\n";
     return out.str();
 }
 
@@ -720,15 +720,39 @@ MiningResult try_mine_on_cuda(const std::vector<uint8_t>& tail_template,
 
 int main(int argc, char** argv) {
     try {
-        const std::string prefix_arg = lower_hex(argc > 1 ? argv[1] : kDefaultPrefix);
-        const int nonce_digits = argc > 2 ? std::stoi(argv[2]) : kDefaultNonceDigits;
-        const int device = argc > 3 ? std::stoi(argv[3]) : 0;
+        std::string prefix_arg = kDefaultPrefix;
+        int nonce_digits = kDefaultNonceDigits;
+        int device = 0;
+        int positional_index = 0;
 
-        if (argc > 4) {
-            std::cerr << usage(argv[0]);
-            return 1;
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg = argv[i];
+
+            if (arg == "--help" || arg == "-h") {
+                std::cout << usage(argv[0]);
+                return 0;
+            }
+
+            if (arg == "--prefix" || arg == "-p") {
+                if (i + 1 >= argc) {
+                    throw std::runtime_error("Missing value after --prefix.");
+                }
+                prefix_arg = lower_hex(argv[++i]);
+                continue;
+            }
+
+            if (positional_index == 0) {
+                nonce_digits = std::stoi(arg);
+            } else if (positional_index == 1) {
+                device = std::stoi(arg);
+            } else {
+                std::cerr << usage(argv[0]);
+                return 1;
+            }
+            ++positional_index;
         }
 
+        prefix_arg = lower_hex(prefix_arg);
         const PrefixTarget prefix = parse_prefix(prefix_arg);
         const uint64_t max_nonce = pow10_u64(nonce_digits);
 
