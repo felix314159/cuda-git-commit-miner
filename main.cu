@@ -738,6 +738,16 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Run this program inside a git repository.");
         }
 
+        const std::string object_format = trim_trailing_newlines(
+            run_command("git rev-parse --show-object-format 2>/dev/null"));
+        if (object_format != "sha1") {
+            throw std::runtime_error(
+                "This miner only supports SHA-1 Git repositories. "
+                "The current repository uses object format '" +
+                object_format +
+                "', so the program's SHA-1 commit mining would produce the wrong commit ID.");
+        }
+
         const std::string raw_commit = run_command("git cat-file commit HEAD");
         const size_t separator = raw_commit.find("\n\n");
         if (separator == std::string::npos) {
