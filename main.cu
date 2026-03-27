@@ -58,6 +58,13 @@ struct MiningResult {
     std::string backend;
 };
 
+struct CommitterHeaderParts {
+    std::string base_name;
+    std::string email;
+    std::string payload_prefix;
+    std::string payload_suffix;
+};
+
 __constant__ uint8_t c_prefix_bytes[20];
 __constant__ uint8_t c_prefix_mask[20];
 
@@ -251,11 +258,81 @@ std::string strip_existing_mined_date_suffix(const std::string& message) {
     return message.substr(0, start);
 }
 
+CommitterHeaderParts parse_committer_header(const std::string& headers,
+                                            const std::string& message_with_final_newline) {
+    constexpr const char* kCommitterPrefix = "committer ";
+    constexpr size_t kCommitterPrefixLen = 10;
+
+    size_t line_start = std::string::npos;
+    if (headers.rfind(kCommitterPrefix, 0) == 0) {
+        line_start = 0;
+    } else {
+        const size_t marker = headers.find("\ncommitter ");
+        if (marker != std::string::npos) {
+            line_start = marker + 1;
+        }
+    }
+    if (line_start == std::string::npos) {
+        throw std::runtime_error("Could not find the committer header in HEAD.");
+    }
+
+    const size_t line_end = headers.find('\n', line_start);
+    if (line_end == std::string::npos) {
+        throw std::runtime_error("Could not parse the committer header in HEAD.");
+    }
+
+    const std::string line = headers.substr(line_start, line_end - line_start);
+    if (line.rfind(kCommitterPrefix, 0) != 0) {
+        throw std::runtime_error("Malformed committer header in HEAD.");
+    }
+
+    const std::string body = line.substr(kCommitterPrefixLen);
+    const size_t tz_start = body.rfind(' ');
+    if (tz_start == std::string::npos || tz_start == 0) {
+        throw std::runtime_error("Could not parse the committer timezone in HEAD.");
+    }
+    const size_t timestamp_start = body.rfind(' ', tz_start - 1);
+    if (timestamp_start == std::string::npos || timestamp_start == 0) {
+        throw std::runtime_error("Could not parse the committer timestamp in HEAD.");
+    }
+
+    const std::string name_and_email = body.substr(0, timestamp_start);
+    const size_t email_start = name_and_email.rfind(" <");
+    if (email_start == std::string::npos || email_start == 0) {
+        throw std::runtime_error("Could not parse the committer name/email in HEAD.");
+    }
+
+    CommitterHeaderParts parts;
+    parts.base_name = name_and_email.substr(0, email_start);
+    parts.email = name_and_email.substr(email_start + 2,
+                                        name_and_email.size() - email_start - 3);
+    parts.payload_prefix =
+        headers.substr(0, line_start) + kCommitterPrefix + parts.base_name + " ";
+    parts.payload_suffix =
+        body.substr(email_start) + headers.substr(line_end) + message_with_final_newline;
+    return parts;
+}
+
 std::string lower_hex(std::string value) {
     for (char& ch : value) {
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     }
     return value;
+}
+
+std::string shell_single_quote(const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 2);
+    out.push_back('\'');
+    for (char ch : value) {
+        if (ch == '\'') {
+            out += "'\"'\"'";
+        } else {
+            out.push_back(ch);
+        }
+    }
+    out.push_back('\'');
+    return out;
 }
 
 bool is_hex_string(const std::string& value) {
@@ -307,18 +384,6 @@ uint64_t pow10_u64(int digits) {
         result *= 10;
     }
     return result;
-}
-
-std::string format_now_local() {
-    const std::time_t now = std::time(nullptr);
-    std::tm tm{};
-    localtime_r(&now, &tm);
-
-    char buffer[32];
-    if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%d, %H:%M:%S", &tm) == 0) {
-        throw std::runtime_error("Failed to format local time.");
-    }
-    return std::string(buffer);
 }
 
 std::string format_nonce(uint64_t nonce, int digits) {
@@ -788,10 +853,11 @@ int main(int argc, char** argv) {
         const std::string original_message = raw_commit.substr(separator + 2);
         const std::string base_message =
             strip_existing_mined_date_suffix(trim_trailing_newlines(original_message));
-        const std::string timestamp = format_now_local();
-        const std::string suffix_prefix = ", Date: " + timestamp + ".";
-        const std::string payload_prefix = headers + base_message + suffix_prefix;
-        const std::string payload_suffix = "\n";
+        const std::string message_with_final_newline = base_message + "\n";
+        const CommitterHeaderParts committer =
+            parse_committer_header(headers, message_with_final_newline);
+        const std::string payload_prefix = committer.payload_prefix;
+        const std::string payload_suffix = committer.payload_suffix;
         const std::string zero_nonce(static_cast<size_t>(nonce_digits), '0');
 
         std::vector<uint8_t> base_object =
@@ -816,7 +882,7 @@ int main(int argc, char** argv) {
 
         const std::vector<uint8_t> tail_template(base_object.begin() + static_cast<long>(tail_start),
                                                  base_object.end());
-        std::cout << "Timestamp suffix seed: " << timestamp << "\n";
+        std::cout << "Committer name seed: " << committer.base_name << "\n";
         std::cout << "Nonce digits: " << nonce_digits << "\n";
 
         std::string warning;
@@ -856,7 +922,8 @@ int main(int argc, char** argv) {
         }
 
         const std::string nonce = format_nonce(mining.nonce, nonce_digits);
-        const std::string final_message = base_message + suffix_prefix + nonce + payload_suffix;
+        const std::string final_message = message_with_final_newline;
+        const std::string final_committer_name = committer.base_name + " " + nonce;
         std::vector<uint8_t> final_object = make_candidate_object(payload_prefix, nonce, payload_suffix);
         uint32_t verify_state[5];
         sha1_init(verify_state);
@@ -883,14 +950,19 @@ int main(int argc, char** argv) {
 
         std::cout << "Matched hash:  " << hex_digest(verify_state) << "\n";
         std::cout << "Matched nonce: " << nonce << "\n";
+        std::cout << "Matched committer name: " << final_committer_name << "\n";
         std::cout << "\nUse this exact commit message:\n";
         std::cout << "-----BEGIN COMMIT MESSAGE-----\n";
         std::cout << final_message;
         std::cout << "-----END COMMIT MESSAGE-----\n";
+        std::cout << "\nUse this exact GIT_COMMITTER_NAME:\n";
+        std::cout << final_committer_name << "\n";
         std::cout << "\nSuggested amend command:\n";
-        std::cout << "GIT_AUTHOR_DATE='" << author_date
-                  << "' GIT_COMMITTER_DATE='" << committer_date
-                  << "' git commit --amend --allow-empty --no-gpg-sign "
+        std::cout << "GIT_AUTHOR_DATE=" << shell_single_quote(author_date)
+                  << " GIT_COMMITTER_DATE=" << shell_single_quote(committer_date)
+                  << " GIT_COMMITTER_EMAIL=" << shell_single_quote(committer.email)
+                  << " GIT_COMMITTER_NAME=" << shell_single_quote(final_committer_name)
+                  << " git commit --amend --allow-empty --no-gpg-sign "
                      "--cleanup=verbatim -F - <<'__GITMINER_MESSAGE__'\n";
         std::cout << final_message;
         std::cout << "__GITMINER_MESSAGE__\n";

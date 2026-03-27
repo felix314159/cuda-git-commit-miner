@@ -1,6 +1,6 @@
 # cuda-git-commit-miner
 
-Just by changing the commit message you can mine any commit hash you want (bottleneck: compute). Most repos use SHA1, but it is possible to toggle SHA256. This script only works for SHA1 and will terminate if it detects that the repo is configured to use SHA256. CUDA is preferred, but actually this script has a CPU mining fallback. When targeting 7 specific digits on a base model M4 mac mini it takes less than 30 sec to CPU mine. When targeting 7 digits on an RTX 4070 ti using CUDA you instantly find the solution.
+By changing only `GIT_COMMITTER_NAME` while keeping the commit message stable, you can mine any commit hash prefix you want (bottleneck: compute). The suggested amend command restores the original message text without adding a mined date suffix. Most repos use SHA1, but it is possible to toggle SHA256. This script only works for SHA1 and will terminate if it detects that the repo is configured to use SHA256. CUDA is preferred, but actually this script has a CPU mining fallback. When targeting 7 specific digits on a base model M4 mac mini it takes less than 30 sec to CPU mine. When targeting 7 digits on an RTX 4070 ti using CUDA you instantly find the solution.
 
 ## Build
 
