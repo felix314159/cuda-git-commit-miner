@@ -15,3 +15,11 @@ Create any commit, then run:
 or if you want a custom commit hash prefix run
 
 * `./gitminer-head --prefix 1234567`
+
+Other targets could be readable words, like:
+
+* `/gitminer-head --prefix 0facade`
+* `/gitminer-head --prefix 1decade`
+* `/gitminer-head --prefix beeeeef`
+* `/gitminer-head --prefix faceb00`
+* `/gitminer-head --prefix caffeee`
