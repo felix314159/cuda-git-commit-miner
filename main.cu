@@ -258,6 +258,38 @@ std::string strip_existing_mined_date_suffix(const std::string& message) {
     return message.substr(0, start);
 }
 
+std::string strip_gpgsig_header(const std::string& headers) {
+    std::string out;
+    out.reserve(headers.size());
+
+    bool skipping_gpgsig = false;
+    size_t pos = 0;
+    while (pos < headers.size()) {
+        const size_t line_end = headers.find('\n', pos);
+        if (line_end == std::string::npos) {
+            throw std::runtime_error("Malformed commit headers in HEAD.");
+        }
+
+        const std::string line = headers.substr(pos, line_end - pos);
+        if (!skipping_gpgsig) {
+            if (line.rfind("gpgsig ", 0) == 0) {
+                skipping_gpgsig = true;
+            } else {
+                out.append(line);
+                out.push_back('\n');
+            }
+        } else if (line.empty() || line[0] != ' ') {
+            skipping_gpgsig = false;
+            out.append(line);
+            out.push_back('\n');
+        }
+
+        pos = line_end + 1;
+    }
+
+    return out;
+}
+
 CommitterHeaderParts parse_committer_header(const std::string& headers,
                                             const std::string& message_with_final_newline) {
     constexpr const char* kCommitterPrefix = "committer ";
@@ -843,11 +875,12 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Could not split HEAD commit into headers and message.");
         }
 
-        const std::string headers = raw_commit.substr(0, separator + 2);
-        if (headers.find("\ngpgsig ") != std::string::npos || headers.rfind("gpgsig ", 0) == 0) {
-            throw std::runtime_error(
-                "Signed commits are not supported here because a later amend would rewrite the "
-                "signature and invalidate the mined hash.");
+        const std::string raw_headers = raw_commit.substr(0, separator + 2);
+        const std::string headers = strip_gpgsig_header(raw_headers);
+        const bool head_was_signed = headers.size() != raw_headers.size();
+        if (head_was_signed) {
+            std::cout << "HEAD is signed; its signature will be stripped during mining, "
+                         "so the mined replacement commit will be unsigned.\n";
         }
 
         const std::string original_message = raw_commit.substr(separator + 2);
