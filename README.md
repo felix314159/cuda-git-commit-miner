@@ -14,12 +14,18 @@ Create any commit, then run:
 
 or if you want a custom commit hash prefix run
 
-* `./gitminer-head --prefix 1234567`
+* `./gitminer-head 1234567`
+
+The miner picks `nonce_digits` automatically from the requested hex prefix
+length. If you want to choose a CUDA device explicitly, pass it as the second
+argument, for example:
+
+* `./gitminer-head 7a11effec7 0`
 
 Other targets could be readable words, like:
 
-* `/gitminer-head --prefix 0facade`
-* `/gitminer-head --prefix 1decade`
-* `/gitminer-head --prefix beeeeef`
-* `/gitminer-head --prefix faceb00`
-* `/gitminer-head --prefix caffeee`
+* `/gitminer-head 0facade`
+* `/gitminer-head 1decade`
+* `/gitminer-head beeeeef`
+* `/gitminer-head faceb00`
+* `/gitminer-head caffeee`

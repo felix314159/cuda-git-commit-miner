@@ -5,7 +5,7 @@
 //   nvcc -O3 -std=c++17 -arch=sm_89 main.cu -o gitminer-head
 //
 // Run:
-//   ./gitminer-head [--prefix 0000000] [nonce_digits=10] [device=0]
+//   ./gitminer-head [prefix=0000000] [device=0]
 
 #include <cuda_runtime.h>
 
@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -40,7 +41,7 @@
 namespace {
 
 constexpr const char* kDefaultPrefix = "0000000";
-constexpr int kDefaultNonceDigits = 10;
+constexpr int kMaxNonceDigits = 18;
 constexpr int kThreadsPerBlock = 256;
 constexpr uint64_t kCandidatesPerThread = 2048;
 constexpr int kMaxTailBytes = 256;
@@ -407,8 +408,9 @@ PrefixTarget parse_prefix(const std::string& value) {
 }
 
 uint64_t pow10_u64(int digits) {
-    if (digits <= 0 || digits > 18) {
-        throw std::runtime_error("Nonce digits must be between 1 and 18.");
+    if (digits <= 0 || digits > kMaxNonceDigits) {
+        throw std::runtime_error("Nonce digits must be between 1 and " +
+                                 std::to_string(kMaxNonceDigits) + ".");
     }
 
     uint64_t result = 1;
@@ -416,6 +418,16 @@ uint64_t pow10_u64(int digits) {
         result *= 10;
     }
     return result;
+}
+
+int auto_nonce_digits_for_prefix(int prefix_hex_chars) {
+    if (prefix_hex_chars <= 0) {
+        throw std::runtime_error("Prefix must be at least 1 hex character.");
+    }
+
+    const double decimal_digits = std::ceil(static_cast<double>(prefix_hex_chars) *
+                                            std::log10(16.0));
+    return std::min(kMaxNonceDigits, std::max(1, static_cast<int>(decimal_digits)));
 }
 
 std::string format_nonce(uint64_t nonce, int digits) {
@@ -474,8 +486,7 @@ std::vector<uint8_t> make_candidate_object(const std::string& header_and_body_pr
 
 std::string usage(const char* argv0) {
     std::ostringstream out;
-    out << "Usage: " << argv0 << " [--prefix HEX] [nonce_digits=" << kDefaultNonceDigits
-        << "] [device=0]\n";
+    out << "Usage: " << argv0 << " [prefix=" << kDefaultPrefix << "] [device=0]\n";
     return out.str();
 }
 
@@ -818,7 +829,6 @@ MiningResult try_mine_on_cuda(const std::vector<uint8_t>& tail_template,
 int main(int argc, char** argv) {
     try {
         std::string prefix_arg = kDefaultPrefix;
-        int nonce_digits = kDefaultNonceDigits;
         int device = 0;
         int positional_index = 0;
 
@@ -830,16 +840,8 @@ int main(int argc, char** argv) {
                 return 0;
             }
 
-            if (arg == "--prefix" || arg == "-p") {
-                if (i + 1 >= argc) {
-                    throw std::runtime_error("Missing value after --prefix.");
-                }
-                prefix_arg = lower_hex(argv[++i]);
-                continue;
-            }
-
             if (positional_index == 0) {
-                nonce_digits = std::stoi(arg);
+                prefix_arg = lower_hex(arg);
             } else if (positional_index == 1) {
                 device = std::stoi(arg);
             } else {
@@ -851,6 +853,7 @@ int main(int argc, char** argv) {
 
         prefix_arg = lower_hex(prefix_arg);
         const PrefixTarget prefix = parse_prefix(prefix_arg);
+        const int nonce_digits = auto_nonce_digits_for_prefix(prefix.hex_chars);
         const uint64_t max_nonce = pow10_u64(nonce_digits);
 
         const std::string inside_work_tree = trim_trailing_newlines(
@@ -916,7 +919,7 @@ int main(int argc, char** argv) {
         const std::vector<uint8_t> tail_template(base_object.begin() + static_cast<long>(tail_start),
                                                  base_object.end());
         std::cout << "Committer name seed: " << committer.base_name << "\n";
-        std::cout << "Nonce digits: " << nonce_digits << "\n";
+        std::cout << "Nonce digits: " << nonce_digits << " (auto)\n";
 
         std::string warning;
         MiningResult mining = try_mine_on_cuda(tail_template,
@@ -934,7 +937,7 @@ int main(int argc, char** argv) {
         if (!warning.empty()) {
             std::cerr << warning << "\n";
         }
-        if (!mining.found) {
+        if (!mining.found && !warning.empty()) {
             std::cout << "Mining HEAD for prefix " << prefix_arg << " on CPU with "
                       << std::max(1u, std::thread::hardware_concurrency()) << " threads\n";
             mining = mine_on_cpu(tail_template,
