@@ -44,7 +44,7 @@ constexpr const char* kDefaultPrefix = "0000000";
 constexpr int kMaxNonceDigits = 18;
 constexpr int kThreadsPerBlock = 256;
 constexpr uint64_t kCandidatesPerThread = 2048;
-constexpr int kMaxTailBytes = 256;
+constexpr int kMaxTailBytes = 1024;
 
 struct PrefixTarget {
     std::array<uint8_t, 20> bytes{};
