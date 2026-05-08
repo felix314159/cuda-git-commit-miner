@@ -368,17 +368,31 @@ std::string shell_single_quote(const std::string& value) {
     return out;
 }
 
+bool is_ascii_hex_digit(char ch) {
+    return (ch >= '0' && ch <= '9') ||
+           (ch >= 'a' && ch <= 'f') ||
+           (ch >= 'A' && ch <= 'F');
+}
+
 bool is_hex_string(const std::string& value) {
     return !value.empty() &&
-           std::all_of(value.begin(), value.end(), [](unsigned char ch) {
-               return std::isxdigit(ch) != 0;
-           });
+           std::all_of(value.begin(), value.end(), is_ascii_hex_digit);
+}
+
+void validate_prefix_text(const std::string& value) {
+    if (value.empty()) {
+        throw std::runtime_error("Prefix must be at least 1 hex character.");
+    }
+    if (value.size() > 40) {
+        throw std::runtime_error("Prefix must be at most 40 hex characters.");
+    }
+    if (!is_hex_string(value)) {
+        throw std::runtime_error("Target prefix is not a hex string.");
+    }
 }
 
 PrefixTarget parse_prefix(const std::string& value) {
-    if (value.empty() || value.size() > 40 || !is_hex_string(value)) {
-        throw std::runtime_error("Prefix must be 1-40 hex characters.");
-    }
+    validate_prefix_text(value);
 
     PrefixTarget target;
     target.hex_chars = static_cast<int>(value.size());
@@ -842,6 +856,7 @@ int main(int argc, char** argv) {
 
             if (positional_index == 0) {
                 prefix_arg = lower_hex(arg);
+                validate_prefix_text(prefix_arg);
             } else if (positional_index == 1) {
                 device = std::stoi(arg);
             } else {
