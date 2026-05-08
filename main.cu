@@ -7,7 +7,9 @@
 // Run:
 //   ./gitminer-head [prefix=0000000] [device=0]
 
+#ifndef GITMINER_CPU_ONLY
 #include <cuda_runtime.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -29,6 +31,15 @@
 #include <thread>
 #include <vector>
 
+#if defined(GITMINER_CPU_ONLY) && defined(__aarch64__)
+#include <arm_neon.h>
+#define GITMINER_HAVE_ARM_SHA1 1
+#endif
+
+#ifdef GITMINER_CPU_ONLY
+#define GITMINER_HD
+#else
+#define GITMINER_HD __host__ __device__
 #define CUDA_CHECK(call)                                                         \
     do {                                                                         \
         cudaError_t err__ = (call);                                              \
@@ -37,6 +48,7 @@
                                      cudaGetErrorString(err__));                 \
         }                                                                        \
     } while (0)
+#endif
 
 namespace {
 
@@ -49,6 +61,8 @@ constexpr int kMaxTailBytes = 1024;
 struct PrefixTarget {
     std::array<uint8_t, 20> bytes{};
     std::array<uint8_t, 20> mask{};
+    std::array<uint32_t, 5> word_values{};
+    std::array<uint32_t, 5> word_masks{};
     int hex_chars = 0;
 };
 
@@ -66,14 +80,16 @@ struct CommitterHeaderParts {
     std::string payload_suffix;
 };
 
+#ifndef GITMINER_CPU_ONLY
 __constant__ uint8_t c_prefix_bytes[20];
 __constant__ uint8_t c_prefix_mask[20];
+#endif
 
-__host__ __device__ inline uint32_t rotl32(uint32_t value, int shift) {
+GITMINER_HD inline uint32_t rotl32(uint32_t value, int shift) {
     return (value << shift) | (value >> (32 - shift));
 }
 
-__host__ __device__ void sha1_transform(const uint8_t block[64], uint32_t state[5]) {
+GITMINER_HD void sha1_transform(const uint8_t block[64], uint32_t state[5]) {
     uint32_t w[80];
 
 #pragma unroll
@@ -128,6 +144,109 @@ __host__ __device__ void sha1_transform(const uint8_t block[64], uint32_t state[
     state[2] += c;
     state[3] += d;
     state[4] += e;
+}
+
+#ifdef GITMINER_HAVE_ARM_SHA1
+void sha1_transform_arm_sha1(const uint8_t block[64], uint32_t state[5]) {
+    const uint32x4_t saved_abcd = vld1q_u32(state);
+    const uint32_t saved_e = state[4];
+    uint32x4_t abcd = saved_abcd;
+    uint32_t e = saved_e;
+
+    uint32x4_t w0 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block)));
+    uint32x4_t w1 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + 16)));
+    uint32x4_t w2 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + 32)));
+    uint32x4_t w3 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + 48)));
+
+    const uint32x4_t k0 = vdupq_n_u32(0x5a827999u);
+    const uint32x4_t k1 = vdupq_n_u32(0x6ed9eba1u);
+    const uint32x4_t k2 = vdupq_n_u32(0x8f1bbcdcu);
+    const uint32x4_t k3 = vdupq_n_u32(0xca62c1d6u);
+
+    auto round_c = [&](uint32x4_t wk) {
+        const uint32x4_t old_abcd = abcd;
+        abcd = vsha1cq_u32(abcd, e, wk);
+        e = vsha1h_u32(vgetq_lane_u32(old_abcd, 0));
+    };
+    auto round_p = [&](uint32x4_t wk) {
+        const uint32x4_t old_abcd = abcd;
+        abcd = vsha1pq_u32(abcd, e, wk);
+        e = vsha1h_u32(vgetq_lane_u32(old_abcd, 0));
+    };
+    auto round_m = [&](uint32x4_t wk) {
+        const uint32x4_t old_abcd = abcd;
+        abcd = vsha1mq_u32(abcd, e, wk);
+        e = vsha1h_u32(vgetq_lane_u32(old_abcd, 0));
+    };
+
+    round_c(vaddq_u32(w0, k0));
+    w0 = vsha1su0q_u32(w0, w1, w2);
+    w0 = vsha1su1q_u32(w0, w3);
+    round_c(vaddq_u32(w1, k0));
+    w1 = vsha1su0q_u32(w1, w2, w3);
+    w1 = vsha1su1q_u32(w1, w0);
+    round_c(vaddq_u32(w2, k0));
+    w2 = vsha1su0q_u32(w2, w3, w0);
+    w2 = vsha1su1q_u32(w2, w1);
+    round_c(vaddq_u32(w3, k0));
+    w3 = vsha1su0q_u32(w3, w0, w1);
+    w3 = vsha1su1q_u32(w3, w2);
+    round_c(vaddq_u32(w0, k0));
+    w0 = vsha1su0q_u32(w0, w1, w2);
+    w0 = vsha1su1q_u32(w0, w3);
+
+    round_p(vaddq_u32(w1, k1));
+    w1 = vsha1su0q_u32(w1, w2, w3);
+    w1 = vsha1su1q_u32(w1, w0);
+    round_p(vaddq_u32(w2, k1));
+    w2 = vsha1su0q_u32(w2, w3, w0);
+    w2 = vsha1su1q_u32(w2, w1);
+    round_p(vaddq_u32(w3, k1));
+    w3 = vsha1su0q_u32(w3, w0, w1);
+    w3 = vsha1su1q_u32(w3, w2);
+    round_p(vaddq_u32(w0, k1));
+    w0 = vsha1su0q_u32(w0, w1, w2);
+    w0 = vsha1su1q_u32(w0, w3);
+    round_p(vaddq_u32(w1, k1));
+    w1 = vsha1su0q_u32(w1, w2, w3);
+    w1 = vsha1su1q_u32(w1, w0);
+
+    round_m(vaddq_u32(w2, k2));
+    w2 = vsha1su0q_u32(w2, w3, w0);
+    w2 = vsha1su1q_u32(w2, w1);
+    round_m(vaddq_u32(w3, k2));
+    w3 = vsha1su0q_u32(w3, w0, w1);
+    w3 = vsha1su1q_u32(w3, w2);
+    round_m(vaddq_u32(w0, k2));
+    w0 = vsha1su0q_u32(w0, w1, w2);
+    w0 = vsha1su1q_u32(w0, w3);
+    round_m(vaddq_u32(w1, k2));
+    w1 = vsha1su0q_u32(w1, w2, w3);
+    w1 = vsha1su1q_u32(w1, w0);
+    round_m(vaddq_u32(w2, k2));
+    w2 = vsha1su0q_u32(w2, w3, w0);
+    w2 = vsha1su1q_u32(w2, w1);
+
+    round_p(vaddq_u32(w3, k3));
+    w3 = vsha1su0q_u32(w3, w0, w1);
+    w3 = vsha1su1q_u32(w3, w2);
+    round_p(vaddq_u32(w0, k3));
+    round_p(vaddq_u32(w1, k3));
+    round_p(vaddq_u32(w2, k3));
+    round_p(vaddq_u32(w3, k3));
+
+    abcd = vaddq_u32(abcd, saved_abcd);
+    vst1q_u32(state, abcd);
+    state[4] = e + saved_e;
+}
+#endif
+
+void sha1_transform_host(const uint8_t block[64], uint32_t state[5]) {
+#ifdef GITMINER_HAVE_ARM_SHA1
+    sha1_transform_arm_sha1(block, state);
+#else
+    sha1_transform(block, state);
+#endif
 }
 
 void sha1_init(uint32_t state[5]) {
@@ -418,6 +537,15 @@ PrefixTarget parse_prefix(const std::string& value) {
         }
     }
 
+    for (size_t i = 0; i < target.bytes.size(); ++i) {
+        const size_t word_index = i / 4;
+        const int shift = static_cast<int>((3 - (i % 4)) * 8);
+        target.word_values[word_index] |=
+            static_cast<uint32_t>(target.bytes[i]) << shift;
+        target.word_masks[word_index] |=
+            static_cast<uint32_t>(target.mask[i]) << shift;
+    }
+
     return target;
 }
 
@@ -462,20 +590,10 @@ std::string hex_digest(const uint32_t state[5]) {
     return out.str();
 }
 
-void sha1_bytes_from_state(const uint32_t state[5], uint8_t digest[20]) {
-    for (int i = 0; i < 5; ++i) {
-        digest[i * 4] = static_cast<uint8_t>(state[i] >> 24);
-        digest[i * 4 + 1] = static_cast<uint8_t>(state[i] >> 16);
-        digest[i * 4 + 2] = static_cast<uint8_t>(state[i] >> 8);
-        digest[i * 4 + 3] = static_cast<uint8_t>(state[i]);
-    }
-}
-
 bool matches_prefix_host(const uint32_t state[5], const PrefixTarget& target) {
-    uint8_t digest[20];
-    sha1_bytes_from_state(state, digest);
-    for (int i = 0; i < 20; ++i) {
-        if ((digest[i] & target.mask[static_cast<size_t>(i)]) != target.bytes[static_cast<size_t>(i)]) {
+    for (int i = 0; i < 5; ++i) {
+        const size_t index = static_cast<size_t>(i);
+        if ((state[i] & target.word_masks[index]) != target.word_values[index]) {
             return false;
         }
     }
@@ -504,25 +622,36 @@ std::string usage(const char* argv0) {
     return out.str();
 }
 
-__host__ __device__ void copy_bytes(uint8_t* dst, const uint8_t* src, int len) {
+GITMINER_HD void copy_bytes(uint8_t* dst, const uint8_t* src, int len) {
     for (int i = 0; i < len; ++i) {
         dst[i] = src[i];
     }
 }
 
-__host__ __device__ void copy_words(uint32_t* dst, const uint32_t* src, int len) {
+GITMINER_HD void copy_words(uint32_t* dst, const uint32_t* src, int len) {
     for (int i = 0; i < len; ++i) {
         dst[i] = src[i];
     }
 }
 
-__host__ __device__ void write_nonce_decimal(uint8_t* dst, int digits, uint64_t nonce) {
+GITMINER_HD void write_nonce_decimal(uint8_t* dst, int digits, uint64_t nonce) {
     for (int i = digits - 1; i >= 0; --i) {
         dst[i] = static_cast<uint8_t>('0' + (nonce % 10));
         nonce /= 10;
     }
 }
 
+void increment_nonce_decimal(uint8_t* value, int digits) {
+    for (int i = digits - 1; i >= 0; --i) {
+        if (value[i] < '9') {
+            ++value[i];
+            return;
+        }
+        value[i] = '0';
+    }
+}
+
+#ifndef GITMINER_CPU_ONLY
 __device__ int pad_tail(uint8_t* buffer, int raw_tail_len, int prefix_len, int total_len) {
     int len = raw_tail_len;
     buffer[len++] = 0x80;
@@ -603,6 +732,7 @@ __global__ void mine_nonce_kernel(const uint8_t* tail_template,
         }
     }
 }
+#endif
 
 MiningResult mine_on_cpu(const std::vector<uint8_t>& tail_template,
                          int tail_len,
@@ -613,12 +743,21 @@ MiningResult mine_on_cpu(const std::vector<uint8_t>& tail_template,
                          uint64_t max_nonce,
                          const uint32_t prefix_state[5],
                          const PrefixTarget& prefix) {
+    constexpr uint64_t kCpuNonceChunk = 4096;
+    constexpr uint64_t kCpuProgressBatch = 4096;
+
     MiningResult result;
     result.backend = "CPU";
+
+    std::array<uint8_t, kMaxTailBytes> padded_tail_template{};
+    std::copy(tail_template.begin(), tail_template.end(), padded_tail_template.begin());
+    const int padded_tail_len =
+        pad_tail_host(padded_tail_template.data(), tail_len, prefix_len, total_len);
 
     const unsigned int hw_threads = std::thread::hardware_concurrency();
     const unsigned int thread_count = std::max(1u, hw_threads);
     std::atomic<bool> found{false};
+    std::atomic<uint64_t> next_nonce{0};
     std::atomic<uint64_t> processed{0};
     std::atomic<uint64_t> found_nonce{0};
     std::array<uint32_t, 5> found_hash{};
@@ -628,31 +767,54 @@ MiningResult mine_on_cpu(const std::vector<uint8_t>& tail_template,
     const auto started_at = std::chrono::steady_clock::now();
 
     for (unsigned int thread_index = 0; thread_index < thread_count; ++thread_index) {
-        workers.emplace_back([&, thread_index]() {
+        workers.emplace_back([&]() {
             uint8_t local_tail[kMaxTailBytes];
             uint32_t state[5];
+            uint64_t local_processed = 0;
 
-            for (uint64_t nonce = thread_index; nonce < max_nonce && !found.load(std::memory_order_relaxed);
-                 nonce += thread_count) {
-                copy_words(state, prefix_state, 5);
-                std::copy(tail_template.begin(), tail_template.end(), local_tail);
-                write_nonce_decimal(local_tail + nonce_offset_in_tail, nonce_digits, nonce);
-                const int padded_len = pad_tail_host(local_tail, tail_len, prefix_len, total_len);
+            copy_bytes(local_tail, padded_tail_template.data(), padded_tail_len);
 
-                for (int offset = 0; offset < padded_len; offset += 64) {
-                    sha1_transform(local_tail + offset, state);
-                }
-
-                processed.fetch_add(1, std::memory_order_relaxed);
-
-                if (matches_prefix_host(state, prefix)) {
-                    bool expected = false;
-                    if (found.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
-                        found_nonce.store(nonce, std::memory_order_relaxed);
-                        found_hash = to_array(state);
-                    }
+            while (!found.load(std::memory_order_relaxed)) {
+                const uint64_t chunk_start =
+                    next_nonce.fetch_add(kCpuNonceChunk, std::memory_order_relaxed);
+                if (chunk_start >= max_nonce) {
                     break;
                 }
+                const uint64_t chunk_end = std::min(chunk_start + kCpuNonceChunk, max_nonce);
+                write_nonce_decimal(local_tail + nonce_offset_in_tail,
+                                    nonce_digits,
+                                    chunk_start);
+
+                for (uint64_t nonce = chunk_start;
+                     nonce < chunk_end && !found.load(std::memory_order_relaxed);
+                     ++nonce) {
+                    copy_words(state, prefix_state, 5);
+
+                    for (int offset = 0; offset < padded_tail_len; offset += 64) {
+                        sha1_transform_host(local_tail + offset, state);
+                    }
+
+                    ++local_processed;
+                    if (local_processed >= kCpuProgressBatch) {
+                        processed.fetch_add(local_processed, std::memory_order_relaxed);
+                        local_processed = 0;
+                    }
+
+                    if (matches_prefix_host(state, prefix)) {
+                        bool expected = false;
+                        if (found.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+                            found_nonce.store(nonce, std::memory_order_relaxed);
+                            found_hash = to_array(state);
+                        }
+                        break;
+                    }
+
+                    increment_nonce_decimal(local_tail + nonce_offset_in_tail, nonce_digits);
+                }
+            }
+
+            if (local_processed > 0) {
+                processed.fetch_add(local_processed, std::memory_order_relaxed);
             }
         });
     }
@@ -695,6 +857,7 @@ MiningResult mine_on_cpu(const std::vector<uint8_t>& tail_template,
     return result;
 }
 
+#ifndef GITMINER_CPU_ONLY
 MiningResult try_mine_on_cuda(const std::vector<uint8_t>& tail_template,
                               int tail_len,
                               int prefix_len,
@@ -837,6 +1000,7 @@ MiningResult try_mine_on_cuda(const std::vector<uint8_t>& tail_template,
 
     return result;
 }
+#endif
 
 }  // namespace
 
@@ -936,6 +1100,7 @@ int main(int argc, char** argv) {
         std::cout << "Committer name seed: " << committer.base_name << "\n";
         std::cout << "Nonce digits: " << nonce_digits << " (auto)\n";
 
+#ifndef GITMINER_CPU_ONLY
         std::string warning;
         MiningResult mining = try_mine_on_cuda(tail_template,
                                                tail_len,
@@ -965,6 +1130,20 @@ int main(int argc, char** argv) {
                                  prefix_state,
                                  prefix);
         }
+#else
+        (void)device;
+        std::cout << "Mining HEAD for prefix " << prefix_arg << " on CPU with "
+                  << std::max(1u, std::thread::hardware_concurrency()) << " threads\n";
+        MiningResult mining = mine_on_cpu(tail_template,
+                                          tail_len,
+                                          static_cast<int>(tail_start),
+                                          static_cast<int>(base_object.size()),
+                                          nonce_offset_in_tail,
+                                          nonce_digits,
+                                          max_nonce,
+                                          prefix_state,
+                                          prefix);
+#endif
 
         if (!mining.found) {
             std::cerr << "No matching nonce found in the " << nonce_digits
